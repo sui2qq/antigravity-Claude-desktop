@@ -722,6 +722,7 @@
 
     const syncAll = () => {
       if (destroyed) return;
+      ensureBridges();
       applyThemeAndStyle();
       ensureOutlineUi();
       syncSettingsDialog();
