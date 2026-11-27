@@ -490,11 +490,24 @@ html[data-ag-claude="1"] .surface-composer-card:focus-within {
   border-color: var(--claude-border-focus) !important;
 }
 
+/* Lock composer editor line-height & footer height so typing never causes 1-2px layout shift */
+html[data-ag-claude="1"] .surface-composer-card [contenteditable="true"],
+html[data-ag-claude="1"] .surface-composer-card [contenteditable="true"] p {
+  line-height: 24px !important;
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
+}
+
+html[data-ag-claude="1"] .surface-composer-card .agy-composer-footer {
+  height: 34px !important;
+  min-height: 34px !important;
+}
+
 html[data-ag-claude="1"] .surface-composer-card [data-testid="send-button"] {
-  width: 32px !important;
-  height: 32px !important;
-  min-width: 32px !important;
-  border-radius: 10px !important;
+  width: 28px !important;
+  height: 28px !important;
+  min-width: 28px !important;
+  border-radius: 9px !important;
   transition: background-color 150ms ease, opacity 150ms ease !important;
 }
 
@@ -562,8 +575,8 @@ html[data-ag-claude-mounted="1"] #ag-claude-telemetry-bar {
   display: inline-flex;
   align-items: center;
   flex-shrink: 0;
-  margin-left: auto;
-  margin-right: 6px;
+  margin-left: 8px;
+  margin-right: auto;
   padding: 0;
   border-radius: 8px;
   font-family: var(--claude-sans);
