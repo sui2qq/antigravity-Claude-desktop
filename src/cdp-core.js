@@ -328,7 +328,8 @@ function buildHostI18nExpression(config = null, rootDir = ROOT_DIR) {
     if (!isHost) return { ok: false, status: 'skipped-non-host' };
     const targetHash = ${serializeForEval(codeHash)};
     const existing = window.__agPrismHostI18n;
-    if (existing && existing.__claudeHash === targetHash && existing.getStatus?.()?.mode === 'on') {
+    const st = existing?.getStatus?.();
+    if (existing && existing.__claudeHash === targetHash && st?.mode === 'on' && (st?.active === true || st?.status === 'active' || st?.status === 'yielded')) {
       return { ok: true, status: 'reused', codeHash: targetHash };
     }
     try { existing?.destroy?.(); } catch {}

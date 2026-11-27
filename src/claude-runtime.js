@@ -213,23 +213,18 @@
       const html = D.documentElement;
       if (!html) return;
       runGuardedMut(() => {
-        if (cfg.enabled) {
-          setAttrIfChanged(html, 'data-ag-claude', '1');
-          setAttrIfChanged(html, 'data-ag-claude-version', PLUGIN_VERSION);
-          setAttrIfChanged(html, 'data-ag-claude-theme', detectDarkTheme() ? 'dark' : 'light');
-          let st = D.getElementById(STYLE_ID);
-          if (!st) {
-            st = D.createElement('style');
-            st.id = STYLE_ID;
-            st.setAttribute('data-ag-claude-owned', '1');
-            (D.head || html).appendChild(st);
-          }
-          if (st.textContent !== cssText) st.textContent = cssText;
-        } else {
-          setAttrIfChanged(html, 'data-ag-claude', null);
-          setAttrIfChanged(html, 'data-ag-claude-theme', null);
-          D.getElementById(STYLE_ID)?.remove();
+        setAttrIfChanged(html, 'data-ag-claude-mounted', '1');
+        setAttrIfChanged(html, 'data-ag-claude-version', PLUGIN_VERSION);
+        setAttrIfChanged(html, 'data-ag-claude-theme', detectDarkTheme() ? 'dark' : 'light');
+        setAttrIfChanged(html, 'data-ag-claude', cfg.enabled ? '1' : null);
+        let st = D.getElementById(STYLE_ID);
+        if (!st) {
+          st = D.createElement('style');
+          st.id = STYLE_ID;
+          st.setAttribute('data-ag-claude-owned', '1');
+          (D.head || html).appendChild(st);
         }
+        if (st.textContent !== cssText) st.textContent = cssText;
       });
     };
 
@@ -600,16 +595,22 @@
         runGuardedMut(() => { usageBtn.textContent = usageLabel; });
       }
 
-      // 在「外观」设置页注入极简 Claude Desktop 设置卡片（仅 3 开关 + 快捷入口）
+      // 在「外观」设置页注入极简 Claude Desktop 设置卡片（仅在当前页为外观页时显示，切换他页自动移除）
       const appearanceTitles = ['Appearance', '外观', '外觀', '外観'];
       let appearancePane = null;
       for (const h2 of dlg.querySelectorAll('h2')) {
+        if (navCol.contains(h2)) continue;
+        if (h2.closest('[data-ag-claude-usage-hidden="1"]')) continue;
         if (appearanceTitles.includes((h2.textContent || '').trim())) {
           appearancePane = h2.closest('div.p-6') || h2.parentElement?.parentElement;
           if (appearancePane) break;
         }
       }
-      if (!appearancePane) return;
+      if (!appearancePane) {
+        const stale = dlg.querySelector('#ag-claude-settings-card');
+        if (stale) runGuardedMut(() => stale.remove());
+        return;
+      }
 
       let card = appearancePane.querySelector('#ag-claude-settings-card');
       const syncSwitchStates = (rootCard) => {
@@ -791,6 +792,7 @@
         const html = D.documentElement;
         if (html) {
           html.removeAttribute('data-ag-claude');
+          html.removeAttribute('data-ag-claude-mounted');
           html.removeAttribute('data-ag-claude-version');
           html.removeAttribute('data-ag-claude-theme');
         }
