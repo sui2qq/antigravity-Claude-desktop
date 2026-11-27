@@ -71,9 +71,54 @@ class ClaudeDesktopDaemon {
     this._lazyClient = null;
     this._modelLabels = new Map();
     this._usageCache = new Map();
+    this._usageSaveTimer = null;
     this._usageCacheFile = path.join(os.homedir(), '.gemini', 'config', 'claude-desktop-usage-cache.json');
     this._legacyUsageCacheFile = path.join(os.homedir(), '.gemini', 'config', 'obsidian-prism-usage-rollup-cache.json');
     this._loadUsageDiskCache();
+  }
+
+  _hasRealTokens(record) {
+    if (!record || !record.days || typeof record.days !== 'object') return false;
+    if (Number(record.calls || 0) > 0) return true;
+    for (const d of Object.values(record.days)) {
+      if (d && Number(d.total || d.tokens || 0) > 0) return true;
+    }
+    return false;
+  }
+
+  _scheduleSaveUsageDiskCache() {
+    if (this._usageSaveTimer) return;
+    this._usageSaveTimer = setTimeout(() => {
+      this._usageSaveTimer = null;
+      this._saveUsageDiskCache();
+    }, 2500);
+  }
+
+  _ingestTrajectoryToUsageCache(id, rawTrajectory, summaryStub = null) {
+    if (!id || !rawTrajectory || !this.usageCore?.analyzeTrajectoryForUsage) return null;
+    try {
+      const low = String(id).toLowerCase();
+      const record = this.usageCore.analyzeTrajectoryForUsage(rawTrajectory, summaryStub || {}, id);
+      if (!record || !record.days) return null;
+      const prev = this._usageCache.get(low);
+      // 若已有真实 Token 缓存而新解析结果为空，保留旧缓存避免退化为 0
+      if (prev && this._hasRealTokens(prev.record) && !this._hasRealTokens(record)) {
+        return prev.record;
+      }
+      const stepCount = Number(record.stepCount || summaryStub?.stepCount || prev?.stepCount || 0) || 0;
+      const lastModifiedSec = Number(record.lastModifiedSec || prev?.lastModifiedSec || Math.floor(Date.now() / 1000)) || 0;
+      this._usageCache.set(low, {
+        stepCount,
+        lastModifiedSec,
+        dbMtimeSec: Number(record.dbMtimeSec || prev?.dbMtimeSec || 0) || 0,
+        dbSize: Number(record.dbSize || prev?.dbSize || 0) || 0,
+        record,
+      });
+      this._scheduleSaveUsageDiskCache();
+      return record;
+    } catch {
+      return null;
+    }
   }
 
   _loadUsageDiskCache() {
@@ -185,6 +230,10 @@ class ClaudeDesktopDaemon {
     this._lazyStore = new MetricsStore({
       dataDir: this.resolveTelemetryDataDir(),
       rendererRpc: (m, b) => this._invokeRendererRpc(m, b),
+      onTrajectory: (_scope, id, raw) => {
+        const sum = this._lazyStore?.summaries?.find?.((s) => String(s?.id || '').toLowerCase() === String(id || '').toLowerCase());
+        this._ingestTrajectoryToUsageCache(id, raw, sum || null);
+      },
       ...(this.activePort ? { cdpPort: this.activePort } : {}),
     });
     return this._lazyStore;
@@ -205,12 +254,15 @@ class ClaudeDesktopDaemon {
     return this._lazyClient;
   }
 
-  async fetchBackendSummaries(client) {
+  async fetchBackendSummaries(client, { softTimeoutMs = 3500 } = {}) {
     const byId = new Map();
     const list = [];
-    // 1. 尝试从 LS / Renderer 获取在线摘要
+    // 1. 尝试从 LS / Renderer 获取在线摘要（带软超时，绝不阻塞磁盘缓存返回）
     try {
-      const resp = await client.call('GetAllCascadeTrajectories', {});
+      const resp = await Promise.race([
+        client.call('GetAllCascadeTrajectories', {}),
+        new Promise((resolve) => setTimeout(() => resolve(null), softTimeoutMs)),
+      ]);
       const map = resp?.trajectorySummaries || {};
       for (const [id, raw] of Object.entries(map)) {
         if (!GUID_RE.test(id)) continue;
@@ -219,16 +271,30 @@ class ClaudeDesktopDaemon {
         list.push(item);
       }
     } catch {}
-    // 2. 补充本地磁盘会话列表（覆盖历史会话）
+    // 2. 补充本地磁盘会话列表（覆盖历史会话、补充 dbMtimeSec/dbSize 加速缓存命中，并作为软超时回退）
     try {
-      const local = discoverLocalConversations();
-      for (const item of Array.isArray(local) ? local : []) {
+      const localRes = await discoverLocalConversations({ host: 'app' });
+      const local = Array.isArray(localRes?.conversations) ? localRes.conversations : [];
+      for (const item of local) {
         const id = String(item?.id || '').trim();
         if (!GUID_RE.test(id)) continue;
         const key = id.toLowerCase();
-        if (!byId.has(key)) {
-          byId.set(key, item);
-          list.push(item);
+        const dbMtimeSec = item.dbMtimeMs > 0 ? Math.floor(item.dbMtimeMs / 1000) : 0;
+        const dbSize = Number(item.dbSize || 0) || 0;
+        const mtimeSec = item.mtimeMs > 0 ? Math.floor(item.mtimeMs / 1000) : dbMtimeSec;
+        const existing = byId.get(key);
+        if (existing) {
+          if (dbMtimeSec > 0 && !existing.dbMtimeSec) existing.dbMtimeSec = dbMtimeSec;
+          if (dbSize > 0 && !existing.dbSize) existing.dbSize = dbSize;
+        } else {
+          const stub = {
+            id,
+            ...(dbMtimeSec > 0 ? { dbMtimeSec } : {}),
+            ...(dbSize > 0 ? { dbSize } : {}),
+            ...(mtimeSec > 0 ? { lastModifiedSec: mtimeSec } : {}),
+          };
+          byId.set(key, stub);
+          list.push(stub);
         }
       }
     } catch {}
@@ -238,7 +304,9 @@ class ClaudeDesktopDaemon {
   async handleUsageCall(parsed) {
     const action = parsed?.action || 'fetch-batch';
     const client = await this.ensureLsClient();
-    const { byId, list } = await this.fetchBackendSummaries(client);
+    const { byId, list } = await this.fetchBackendSummaries(client, {
+      softTimeoutMs: action === 'list-summaries' ? 3000 : 5000,
+    });
 
     if (action === 'list-summaries') {
       const cachedRecords = [];
@@ -260,7 +328,7 @@ class ClaudeDesktopDaemon {
       return { ok: true, scopeKey: 'local', records: cachedRecords, summaries: list };
     }
 
-    const reqItems = Array.isArray(parsed?.items) ? parsed.items.slice(0, 12) : [];
+    const reqItems = Array.isArray(parsed?.items) ? parsed.items.slice(0, 8) : [];
     const records = [];
     let dirty = false;
     for (const item of reqItems) {
@@ -271,7 +339,10 @@ class ClaudeDesktopDaemon {
       const stepCount = Number(item.stepCount || bSum.stepCount || 0) || 0;
       const lastModifiedSec = Number(item.lastModifiedSec || bSum.lastModifiedSec || 0) || 0;
       const hit = this._usageCache.get(low);
-      if (hit?.record?.days && hit.stepCount === stepCount && (!lastModifiedSec || hit.lastModifiedSec === lastModifiedSec)) {
+      const hitHasTok = Boolean(hit && this._hasRealTokens(hit.record));
+      const sameSteps = hitHasTok && (stepCount === 0 || Number(hit.stepCount || 0) === stepCount);
+      const closeTime = !lastModifiedSec || !hit?.lastModifiedSec || Math.abs(Number(hit.lastModifiedSec) - lastModifiedSec) <= 5;
+      if (hitHasTok && sameSteps && closeTime) {
         records.push({ id, mode: 'full', record: hit.record });
         continue;
       }
@@ -285,8 +356,12 @@ class ClaudeDesktopDaemon {
           ? await client.trajectory(id, { force: Boolean(parsed?.force), summary: summaryStub })
           : await client.call('GetCascadeTrajectory', { cascadeId: id });
         const record = this.usageCore.analyzeTrajectoryForUsage(fullTraj, summaryStub, id);
-        if (record && record.days) {
-          this._usageCache.set(low, { stepCount, lastModifiedSec, record });
+        if (record && record.days && (this._hasRealTokens(record) || !hitHasTok)) {
+          this._usageCache.set(low, {
+            stepCount: stepCount || Number(record.stepCount || 0),
+            lastModifiedSec: lastModifiedSec || Number(record.lastModifiedSec || 0),
+            record,
+          });
           dirty = true;
           records.push({ id, mode: 'full', record });
         } else if (hit?.record?.days) {
@@ -309,8 +384,14 @@ class ClaudeDesktopDaemon {
 
   async handleMetricsCall(input) {
     const store = await this.ensureMetricsStore();
+    const cid = input?.conversationId && GUID_RE.test(input.conversationId) ? input.conversationId : null;
+    // 支持仅跳过单会话 4.5s 缓存而不强制刷服务端配额接口
+    if (cid && input?.sessionForce && !input?.force) {
+      const entry = store.sessions?.get?.(cid.toLowerCase());
+      if (entry) entry.updatedAt = 0;
+    }
     return await store.snapshot({
-      conversationId: input?.conversationId && GUID_RE.test(input.conversationId) ? input.conversationId : null,
+      conversationId: cid,
       force: Boolean(input?.force),
       quotaRefresh: Boolean(input?.quotaRefresh),
       selectLatest: input?.selectLatest === false ? false : true,
@@ -487,6 +568,12 @@ class ClaudeDesktopDaemon {
     const stop = () => this.stop();
     process.on('SIGINT', stop);
     process.on('SIGTERM', stop);
+    process.on('unhandledRejection', (reason) => {
+      this.log(`[error] unhandledRejection: ${String(reason?.stack || reason)}`);
+    });
+    process.on('uncaughtException', (err) => {
+      this.log(`[error] uncaughtException: ${String(err?.stack || err)}`);
+    });
     process.on('exit', () => this.releasePidLock());
   }
 

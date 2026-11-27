@@ -211,10 +211,17 @@ de|Subagenten|Token||Ein|Aus|Wenig Kontingent|Wird knapp|Reichlich|Was steht als
         const ls = getLs();
         const raw = ls && JSON.parse(ls.getItem(scopeStorageKey(sc)) || '{}');
         if (raw && typeof raw === 'object') {
+          let anyReal = false;
           for (const [id, rec] of Object.entries(raw)) if (rec?.days) {
             const cr = fixRec(id, rec);
             if (cr !== rec) cacheHealed = true;
+            if (!cr._do && hasPersistedTokens(cr)) anyReal = true;
             usageRecords.set(id, cr);
+          }
+          // 若本地缓存全是延迟占位空记录（0 Token），直接丢弃，避免先闪出全 0 面板
+          if (usageRecords.size > 0 && !anyReal) {
+            usageRecords.clear();
+            try { ls.removeItem(scopeStorageKey(sc)); } catch {}
           }
           if (usageRecords.size > 0) { usageHasData = true; usageDataEpoch += 1; }
         }
@@ -406,7 +413,7 @@ de|Subagenten|Token||Ein|Aus|Wenig Kontingent|Wird knapp|Reichlich|Was steht als
       const bridgeOnline = !!usageBridge?.isOnline?.();
       if (bridgeOnline && isFn(usageBridge.listSummaries)) {
         try {
-          const sumRes = await usageBridge.listSummaries(8000);
+          const sumRes = await usageBridge.listSummaries(12000);
           if (typeof sumRes?.scopeKey === 'string' && sumRes.scopeKey) bridgeScopeKey = normalizeScopeKey(sumRes.scopeKey);
           bridgeRecs = Array.isArray(sumRes?.records) ? sumRes.records : null;
           const bs = sumRes?.summaries;
@@ -496,8 +503,12 @@ de|Subagenten|Token||Ein|Aus|Wenig Kontingent|Wird knapp|Reichlich|Was steht als
       if (staleIds.length === 0) { usageHasData = true; if (canPrune) lastUsageFetchAt = now; if (patchedMeta || deletedAny) saveUsageCache(); renderHomePanel(); return; }
 
       usageLoading = true;
-      if (seededCache) saveUsageCache();
-      if (!usageHasData || seededCache) renderHomePanel();
+      if (seededCache) {
+        usageHasData = true;
+        usageDataEpoch += 1;
+        flushUsageCacheNow();
+      }
+      if (!usageHasData || seededCache) renderHomePanel(true);
       const dbMeta = (a, b) => {
         const m = toNum(a?.dbMtimeSec || b?.dbMtimeSec), s = toNum(a?.dbSize || b?.dbSize);
         return { ...(m > 0 ? { dbMtimeSec: m } : {}), ...(s > 0 ? { dbSize: s } : {}) };
@@ -513,13 +524,13 @@ de|Subagenten|Token||Ein|Aus|Wenig Kontingent|Wird knapp|Reichlich|Was steht als
       };
       try {
         if (usageBridge && isFn(usageBridge.fetchBatch) && bridgeOnline) {
-          for (let i = 0; i < staleIds.length && !isDestroyed(); i += 6) {
-            const slice = staleIds.slice(i, i + 6);
+          for (let i = 0; i < staleIds.length && !isDestroyed(); i += 2) {
+            const slice = staleIds.slice(i, i + 2);
             const reqItems = slice.map(([id, sum]) => {
               const c = usageRecords.get(id), { u, ...mr } = extractMeta(sum, id), gm = toNum(c?.gmCount);
               return { id, ...mr, ...dbMeta(sum), ...(u.length ? { workspaces: u } : {}), gmOffset: c && !c._do && Number.isInteger(gm) && gm > 0 ? gm : 0 };
             });
-            const res = await usageBridge.fetchBatch(reqItems, 18000);
+            const res = await usageBridge.fetchBatch(reqItems, 24000);
             const byId = res?.ok && Array.isArray(res.records) ? new Map(res.records.map((r) => [r.id, r])) : null;
             for (const [id, sum] of slice) {
               const prev = usageRecords.get(id), hit = byId?.get(id), m = extractMeta(sum, id);
@@ -530,7 +541,12 @@ de|Subagenten|Token||Ein|Aus|Wenig Kontingent|Wird knapp|Reichlich|Was steht als
                 usageRecords.set(id, fixRec(id, nr));
               } else deferRec(id, prev, sum);
             }
-            if (i + 6 < staleIds.length && !isDestroyed()) await sleep(40);
+            if (!isDestroyed()) {
+              usageHasData = true;
+              usageDataEpoch += 1;
+              renderHomePanel();
+            }
+            if (i + 2 < staleIds.length && !isDestroyed()) await sleep(40);
           }
         } else {
           const CONC = usageHasData ? 1 : 2;
@@ -677,6 +693,11 @@ de|Subagenten|Token||Ein|Aus|Wenig Kontingent|Wird knapp|Reichlich|Was steht als
       return panelEl;
     };
 
+    let externalRefreshTimer = 0;
+    const stopExternalRefresh = () => {
+      if (externalRefreshTimer) { clearInterval(externalRefreshTimer); externalRefreshTimer = 0; }
+    };
+
     const mountInto = (hostEl) => {
       if (!hostEl || !hostEl.isConnected) return false;
       externalHost = hostEl;
@@ -684,10 +705,22 @@ de|Subagenten|Token||Ein|Aus|Wenig Kontingent|Wird knapp|Reichlich|Was steht als
       renderHomePanel(true);
       void refreshUsageRollup(true);
       void refreshLiveTelemetrySnapshot(true);
+      stopExternalRefresh();
+      // 打开用量统计面板期间每 12 秒静默增量刷新，保持数据实时
+      externalRefreshTimer = setInterval(() => {
+        if (isDestroyed() || !externalHost || !externalHost.isConnected) {
+          stopExternalRefresh();
+          return;
+        }
+        if (getDoc()?.hidden) return;
+        void refreshUsageRollup(true);
+        void refreshLiveTelemetrySnapshot(false);
+      }, 12000);
       return true;
     };
 
     const unmountExternal = () => {
+      stopExternalRefresh();
       if (!externalHost) return;
       externalHost = null;
       if (getHomeLayout() !== 'studio') unmountPanelSeat();
@@ -980,6 +1013,7 @@ de|Subagenten|Token||Ein|Aus|Wenig Kontingent|Wird knapp|Reichlich|Was steht als
 
     const dispose = () => {
       if (disposed) return;
+      stopExternalRefresh();
       flushUsageCacheNow();
       disposed = true;
       unmountPanelSeat();
