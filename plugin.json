@@ -1,0 +1,7 @@
+{
+  "name": "antigravity-claude-desktop",
+  "displayName": "Claude Desktop Theme",
+  "description": "Minimalist Claude Desktop warm-parchment UI theme for Google Antigravity, with clean sidebar typography, prompt outline navigator, host Chinese localization, and dedicated usage stats tab.",
+  "version": "1.0.0",
+  "logo": "assets/logo.svg"
+}

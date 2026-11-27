@@ -1,0 +1,6 @@
+{
+  "enabled": true,
+  "hostLocalization": "on",
+  "navOutline": true,
+  "pollIntervalMs": 2500
+}

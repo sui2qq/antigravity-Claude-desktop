@@ -1,0 +1,18 @@
+{
+  "name": "antigravity-claude-desktop",
+  "version": "1.0.0",
+  "description": "Minimalist Claude Desktop warm-parchment UI plugin for Google Antigravity",
+  "license": "GPL-3.0-only",
+  "private": false,
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "install:plugin": "node scripts/install.cjs --install",
+    "status": "node scripts/install.cjs --status",
+    "inject": "node scripts/inject.cjs",
+    "remove": "node scripts/remove.cjs",
+    "daemon": "node sidecars/daemon/main.mjs",
+    "test": "node --test test/*.test.mjs"
+  }
+}

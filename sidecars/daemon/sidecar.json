@@ -1,0 +1,10 @@
+{
+  "command": "node",
+  "args": [
+    "main.mjs"
+  ],
+  "restart_policy": "always",
+  "display_name": "Claude Desktop Theme Daemon",
+  "description": "Lightweight CDP injection daemon for Antigravity Claude Desktop theme, host localization, and on-demand usage statistics.",
+  "has_web_ui": false
+}

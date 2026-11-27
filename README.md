@@ -1,43 +1,48 @@
-# Antigravity Claude Minimalist Theme Backup
+# Antigravity Claude Desktop
 
-基于开源插件 [RMvdesi/obsidian-prism](https://github.com/RMvdesi/obsidian-prism)（`v1.0.8-beta.2` / `2e27680`，GPL-3.0）的 **Claude 极简暖纸/暖炭风** 自定义样式补丁与配置备份。
+为 **Google Antigravity** 桌面端打造的独立轻量级 **Claude Desktop 暖羊皮纸风格** UI 插件。
+彻底剔除玻璃拟态、霓虹流光、像素小精灵、3D 键盘与底部彩色遥测条等视觉噪音，仅保留极致纯净的 Claude 桌面端排版体验与实用工具。
 
-## 核心特点
+## 核心特性
 
-- **配色（浅色 / 深色双适配）**
-  - 浅色模式：暖米白主画布 `#FAF9F5`、侧栏 `#F0EEE6`、正文 `#1F1E1D`、次级文字 `#73726C`
-  - 深色模式：暖深灰主画布 `#262624`、侧栏 `#1F1E1D`、暖白正文 `#ECEAE3`
-  - 唯一强调色：赤陶橙 `#C96442`（发送按钮、光标、选区与链接）
-- **字体与版心**
-  - UI 与正文统一温润无衬线（`Google Sans Text` + `Segoe UI Variable Text` + 可变字重 `Noto Sans SC`），等高数字 `lining-nums`，行高 `1.66`
-  - 代码区使用 `Cascadia Code`（`13.5px` / 行高 `1.6`）
-  - 对话区居中限制最大宽度 `720px`，留足呼吸留白
-- **极简与流畅度优化**
-  - 去除棱镜流光、环境光效、波纹、渐变、厚阴影、推理滑块与像素伙伴装饰
-  - 输入框 `18px` 大圆角纯净卡片，聚焦仅边框微深不发光；左下角 `+` 与模型选择按钮透明无框
-  - 关闭重复内置汉化（`hostLocalization: "off"`）、3D 机械键盘模型选择器（`periodicModelPicker: "off"`）与自动更新（`autoUpdate: "off"`）
-  - 修复 `subtle` 动效模式下「回到底部」悬浮箭头悬停向右偏移的样式问题
+- **暖羊皮纸视觉系统**（零玻璃拟态 / 零高光白线 / 零蓝光阴影）：
+  - 浅色：主画布 `#FAF9F5` · 侧边栏 `#F0EEE6` · 卡片/输入框 `#FFFFFF` · 正文 `#1F1E1D` · 次级 `#73726C`
+  - 深色：主画布 `#262624` · 侧边栏 `#1F1E1D` · 卡片 `#2F2E2B` · 正文 `#ECEAE3`
+  - 唯一强调色：赤陶橙 `#C96442`
+- **Claude Desktop 排版复刻**：
+  - 侧边栏：37px 舒展顶部操作栏（17px 线性图标 + 14.5px 字号）、12px 克制暖灰分组标签、32px 项目行、33px 清晰会话行与饱满选中胶囊；
+  - 对话流：720px 居中阅读栏、15px / 1.66 无衬线正文（`lining-nums`）、`Cascadia Code` 代码块、纯平无框用户消息气泡；
+  - 输入框：18px 大圆角纯净白卡，移除底部冗余遥测条，仅保留轻量原生控件；
+  - 经典极简首页：温润衬线问候语 + 居中卡片输入框。
+- **实用功能精留**：
+  - 对话区左缘圆点导航 + 可搜索跳转的提问大纲目录；
+  - 设置弹窗左侧「浏览器」下方独立「**用量统计**」栏（活动热力图 / 模型 Token 分布 / 实时配额池）；
+  - 设置「外观」页极简 3 开关设置卡片；
+  - 宿主界面简体中文汉化（可随时在设置中一键开关）。
 
-## 包含文件
+## 安装与使用
 
-- `claude-custom.patch`：针对上游 `obsidian-prism`（基线提交 `2e2768025a54c534d5337791ebd0667ab5a6e192`）的 `style.css` 补丁
-- `config.json`：插件调优配置文件（已关闭 `autoUpdate` 防止覆盖）
-- `apply.ps1`：Windows 一键重新应用与热部署脚本
-
-## 一键恢复 / 重新应用
+> 前置要求：Node.js `>= 22`，且 Antigravity 启动快捷方式带有 `--remote-debugging-port=0` 参数。
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\apply.ps1
-```
-
-## 还原为上游原版样式
-
-```powershell
-cd $env:USERPROFILE\obsidian-prism
-git checkout -- style.css
+# 一键部署并启动后台守护进程（会自动清理旧版 obsidian-prism 防冲突）
 npm run install:plugin
+
+# 查看当前插件与守护进程状态
+npm run status
+
+# 本地修改样式后手动立即热注入当前窗口
+npm run inject
+
+# 一键干净卸载并还原页面
+npm run remove
+
+# 运行自动化测试
+npm test
 ```
 
-## 致谢与许可
+## 开源致谢
 
-本备份中的样式补丁衍生自开源项目 [RMvdesi/obsidian-prism](https://github.com/RMvdesi/obsidian-prism)，沿用 **GPL-3.0-only** 许可证。
+- 底层本地轨迹统计、配额采集器与 CDP 注入思路衍生自 [RMvdesi/obsidian-prism](https://github.com/RMvdesi/obsidian-prism)（GPL-3.0-only）。
+- 宿主简体中文汉化词库与引擎衍生自 [yiheng8023/antigravity-chinese](https://github.com/yiheng8023/antigravity-chinese)（MIT）。
+- 详见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。

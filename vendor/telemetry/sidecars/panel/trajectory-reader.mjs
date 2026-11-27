@@ -1,0 +1,149 @@
+// Upstream: ATtacK030130/antigrative-dashboard v0.9.1 (MIT License — Copyright (c) 2026 AG Pulse contributors)
+// Integrated & adapted for Obsidian Prism under GPL-3.0-only compatibility terms.
+import {budgetError,collectionFailure} from './collection-state.mjs';
+// Statistics-only acquisition. Host schemas accept offsets, not page sizes.
+// Cached immutable prefixes are local numeric/structural projections only.
+const settled=s=>/IDLE|DONE|COMPLETED|CANCELLED|CANCELED|STOPPED|FAILED|ERROR/.test(String(s||''));
+const unavailable=()=>new Error('后台已重新连接，请等待刷新');
+export class TrajectoryReader {
+ // Serialized statistics budget, not transcript/response size. Local resource
+ // experiments cover 1K/8K/32K records; 8 MiB bounds retained objects well below
+ // the 32K-record case (~100 MiB extra heap). See docs/LONG_CONVERSATIONS.md.
+ constructor(client,{budgetBytes=4*1024*1024,idleRecheckMs=30000,maxSummaryEntries=1024,maxPages=4096}={}){this.client=client;this.budgetBytes=budgetBytes;this.idleRecheckMs=idleRecheckMs;this.maxSummaryEntries=maxSummaryEntries;this.maxPages=maxPages;}
+ failures=new Map();
+ entries=new Map();epoch=0;endpoint=null;summaries=null;summaryAt=-Infinity;summaryPending=null;cachedBytes=0;
+ reset(){this.epoch++;this.entries.clear();this.failures.clear();this.summaries=null;this.summaryAt=-Infinity;this.summaryPending=null;this.cachedBytes=0;}
+ trim(keep){for(const [key,e]of this.entries){if(this.cachedBytes<=this.budgetBytes)break;if(key===keep||e.pending)continue;this.cachedBytes-=e.bytes;this.entries.delete(key);}}
+ async summary(id,provided,force){
+  if(provided)return provided;
+    if(force&&this.summaries&&this.client.now()-this.summaryAt<30000)force=false;
+   if(force||!this.summaries||this.client.now()-this.summaryAt>=6000){
+   if(!this.summaryPending){const epoch=this.epoch;
+    const pending=this.client.call('GetAllCascadeTrajectories',{excludeSubtrajectories:false}).then(r=>{
+     if(epoch!==this.epoch)throw unavailable();
+     const all=r.trajectorySummaries||{},entries=Object.entries(all);
+     // Keep the requested conversation even when the host returns more than
+     // the retained summary budget; ordinary entries are capped deterministically.
+     const kept=entries.slice(0,this.maxSummaryEntries);
+     if(all[id]&&!Object.hasOwn(Object.fromEntries(kept),id))kept.splice(Math.max(0,this.maxSummaryEntries-1),1,[id,all[id]]);
+     this.summaries=Object.fromEntries(kept);this.summaryAt=this.client.now();
+    }).finally(()=>{if(this.summaryPending===pending)this.summaryPending=null;});this.summaryPending=pending;
+   }
+   await this.summaryPending;
+  }
+  const s=this.summaries[id];if(!s)throw new Error('会话暂时没有可用统计');return s;
+ }
+ async read(id,{summary:provided,force=false,isCurrent=()=>true}={}){
+  if(!isCurrent())throw unavailable();
+  if(this.isBackgroundManaged?.(id))throw this.failures.get(id)?.error||new Error('会话统计正在后台处理');
+  const endpoint=await this.client.discover();
+  if(!this.endpoint||['pid','port','csrf'].some(k=>this.endpoint[k]!==endpoint[k])){this.reset();this.endpoint=endpoint;}
+  let entry=this.entries.get(id);if(entry?.pending)return entry.pending;
+  entry||={data:null,bytes:0};this.entries.set(id,entry);
+  const epoch=this.epoch,current=()=>epoch===this.epoch&&this.entries.get(id)===entry&&isCurrent();
+  const assertCurrent=()=>{if(!current())throw unavailable();};
+  let attempted=false,attemptMark=null;
+  entry.pending=(async()=>{
+   const failure=this.failures.get(id),now=this.client.now();
+   if(failure&&now<(failure.mark===null&&!force?failure.retryAt:failure.at+10000))throw failure.error;
+   attempted=true;
+   const summary=await this.summary(id,provided,force);assertCurrent();
+   const count=summary.stepCount===undefined?null:Number(summary.stepCount);if(count!==null&&(!Number.isSafeInteger(count)||count<0))throw new Error('会话统计分页数量无效');
+   const mark=JSON.stringify([count,summary.lastModifiedTime,summary.status,summary.lastUserInputStepIndex]);
+   attemptMark=mark;
+   if(failure){
+    const earliest=force?failure.at+10000:mark!==failure.mark?failure.at+30000:failure.retryAt;
+    if(now<earliest){attempted=false;throw failure.error;}
+   }
+   attempted=true;
+   const old=entry.data;
+   const same=old&&entry.mark===mark;
+   if(!failure&&!force&&same&&settled(summary.status)&&summary.lastModifiedTime&&this.client.now()-entry.verifiedAt<this.idleRecheckMs){this.entries.delete(id);this.entries.set(id,entry);return old;}
+   // A changed settled history with no append may have been edited/compacted.
+   const incremental=old&&!force&&count!==null&&count>=old.trajectory.steps.length&&(count>old.trajectory.steps.length||!settled(entry.summary?.status)||same);
+   let stepOffset=0,metadataOffset=0;
+   if(incremental){
+    const lastInput=old.trajectory.steps.findLastIndex(s=>/USER_INPUT/.test(String(s?.type||'')));
+    // The submitted input is immutable within a running turn. Start after it
+    // so a large corpus is not downloaded on each generation-state refresh.
+    stepOffset=lastInput<0?0:lastInput+1;
+    const gs=old.trajectory.generatorMetadata;
+    if(gs.length&&gs.every(g=>Array.isArray(g.stepIndices)&&g.stepIndices.length&&g.stepIndices.every(i=>Number.isInteger(i)&&i>=0))){
+     metadataOffset=Math.max(0,gs.length-1);
+     const associated=(gs.at(-1)?.stepIndices||[]).filter(i=>Number.isInteger(i)&&i>=0&&i<old.trajectory.steps.length&&!/USER_INPUT/.test(String(old.trajectory.steps[i]?.type||'')));
+     stepOffset=associated.length?Math.min(...associated):old.trajectory.steps.length;
+    }
+    // Background tools can finish after newer model requests have started.
+    // Refresh from the earliest unresolved timed tool as well as the last model.
+    const pendingTool=old.trajectory.steps.findIndex(s=>s?.metadata&&(s.metadata.startedAt||s.metadata.createdAt)&&!s.metadata.completedAt&&
+     (/SEARCH_WEB|BROWSE|RUN_COMMAND|COMMAND|READ|WRITE|EDIT|CODE_ACTION|TOOL|MCP|LIST|GREP|VIEW|FIND|TERMINAL|INVOKE_SUBAGENT/i.test(String(s.type||''))||s.metadata.toolCall));
+    if(pendingTool>=0)stepOffset=Math.min(stepOffset,pendingTool);
+    if(gs.some(g=>!Array.isArray(g.stepIndices)||!g.stepIndices.length))metadataOffset=0;
+   }
+   const steps=incremental?old.trajectory.steps.slice(0,stepOffset):[];
+   const generators=incremental?old.trajectory.generatorMetadata.slice(0,metadataOffset):[];
+   const stepSizes=incremental&&Array.isArray(entry.stepSizes)?entry.stepSizes.slice(0,stepOffset):null;
+   const genSizes=incremental&&Array.isArray(entry.genSizes)?entry.genSizes.slice(0,metadataOffset):null;
+   let bytes=0;
+   if(stepSizes&&genSizes&&stepSizes.length===steps.length&&genSizes.length===generators.length){
+    bytes=35;
+    for(let i=0;i<stepSizes.length;i++)bytes+=stepSizes[i];
+    for(let i=0;i<genSizes.length;i++)bytes+=genSizes[i];
+   }else{
+    bytes=Buffer.byteLength(JSON.stringify({steps,generatorMetadata:generators}));
+   }
+   const nextStepSizes=stepSizes&&stepSizes.length===steps.length?stepSizes:steps.map(item=>Buffer.byteLength(JSON.stringify(item))+1);
+   const nextGenSizes=genSizes&&genSizes.length===generators.length?genSizes:generators.map(item=>Buffer.byteLength(JSON.stringify(item))+1);
+   const deadline=this.client.now()+30000;
+   const append=(target,items,sizes)=>{
+    for(const item of items){const itemBytes=Buffer.byteLength(JSON.stringify(item))+1;bytes+=itemBytes;if(bytes>this.budgetBytes)throw budgetError('projected-json',bytes,this.budgetBytes);target.push(item);sizes.push(itemBytes);}
+   };
+   const check=()=>{assertCurrent();if(this.client.now()>deadline)throw new Error('会话统计分页读取超时');};
+   const stepPages=new Set(),metadataPages=new Set();let pageCount=0;
+   while(count===null||steps.length<count){
+    check();if(++pageCount>this.maxPages)throw new Error('会话统计分页数量超过上限');
+    const offset=steps.length;if(stepPages.has(offset))throw new Error('会话统计分页没有推进');stepPages.add(offset);
+    const page=await this.client.call('GetCascadeTrajectorySteps',{cascadeId:id,stepOffset:offset,trajectoryVerbosity:2});check();
+    const items=page.steps||[];if(!Array.isArray(items))throw new Error('会话统计分页格式无效');
+    if(!items.length){if(count===null)break;throw new Error('完整会话统计分页暂不可用');}append(steps,items,nextStepSizes);
+    // Only compare stable item IDs. Some hosts legitimately return structurally
+    // identical marker objects on adjacent offsets; treating their full JSON as
+    // a page identity would reject valid pagination. A repeated offset is still
+    // rejected above, while repeated identified pages fail immediately.
+    const ids=items.map(item=>item?.id??item?.stepId??item?.metadata?.id).filter(Boolean);
+    if(ids.length===items.length){const fingerprint='page:'+JSON.stringify(ids);if(stepPages.has(fingerprint))throw new Error('会话统计分页重复返回');stepPages.add(fingerprint);}
+   }
+   // Full step semantics retain the tool-only timing markers. Their text and
+   // large tool payloads are discarded by the streaming projector.
+   for(;;){
+    check();if(++pageCount>this.maxPages)throw new Error('会话统计分页数量超过上限');
+    const offset=generators.length;if(metadataPages.has(offset))throw new Error('会话统计分页没有推进');metadataPages.add(offset);
+    const page=await this.client.call('GetCascadeTrajectoryGeneratorMetadata',{cascadeId:id,generatorMetadataOffset:offset,includeMessages:false});check();
+    const items=page.generatorMetadata||page.generatorMetadatas||[];if(!Array.isArray(items))throw new Error('会话统计分页格式无效');
+    if(!items.length)break;append(generators,items,nextGenSizes);
+    const ids=items.map(item=>item?.id??item?.generatorId??item?.responseId??item?.chatModel?.responseId).filter(Boolean);
+    if(ids.length===items.length){const fingerprint='page:'+JSON.stringify(ids);if(metadataPages.has(fingerprint))throw new Error('会话统计分页重复返回');metadataPages.add(fingerprint);}
+   }
+   // A growing host may return newer metadata than the step-count snapshot.
+   // Do not cache or persist a mixed/incomplete revision.
+   if(generators.some(g=>(g.stepIndices||[]).some(i=>Number.isInteger(i)&&i>=steps.length)))throw new Error('会话仍在更新，请等待下一次刷新');
+   const value={trajectory:{cascadeId:id,steps,generatorMetadata:generators},numTotalSteps:steps.length,numTotalGeneratorMetadata:generators.length,status:summary.status};
+   assertCurrent();this.cachedBytes-=entry.bytes;entry.bytes=bytes;this.cachedBytes+=bytes;
+   entry.data=value;entry.summary=summary;entry.mark=mark;entry.stepSizes=nextStepSizes;entry.genSizes=nextGenSizes;entry.verifiedAt=this.client.now();this.entries.delete(id);this.entries.set(id,entry);
+   this.failures.delete(id);this.trim(id);
+   return value;
+  })().catch(error=>{
+   if(current()&&attempted&&collectionFailure(error)){
+    const previous=this.failures.get(id),attempts=Math.min(5,(previous?.attempts||0)+1),at=this.client.now();
+    const retryAt=at+Math.min(300000,30000*2**(attempts-1));
+    const value=collectionFailure(error),safe=budgetError(value.kind,value.observed,value.limit);
+    safe.collection.retryAt=new Date(retryAt).toISOString();
+    error=safe;
+    this.failures.delete(id);this.failures.set(id,{error:safe,attempts,at,retryAt,mark:attemptMark});
+    while(this.failures.size>256)this.failures.delete(this.failures.keys().next().value);
+   }
+   throw error;
+  }).finally(()=>{entry.pending=null;if(epoch===this.epoch&&this.entries.get(id)===entry){if(!entry.data)this.entries.delete(id);else if(isCurrent())this.trim(id);}});
+  return entry.pending;
+ }
+}
