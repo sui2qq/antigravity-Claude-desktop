@@ -83,11 +83,11 @@
     if (!W.__agPrismMetricsBridge?.__claudeReady) {
       try { W.__agPrismMetricsBridge?.dispose?.(); } catch {}
       const fm = (x) => ({ connection: 'offline', groups: [], ...x });
-      const rpc = createRpcBridge(METRICS_BINDING, 12000, fm);
+      const rpc = createRpcBridge(METRICS_BINDING, 24000, fm);
       W.__agPrismMetricsBridge = {
         __claudeReady: true,
         isOnline: () => isFn(W[METRICS_BINDING]),
-        getMetrics: (input, ms = 12000) => rpc.send({ input: input || {} }, ms),
+        getMetrics: (input, ms = 24000) => rpc.send({ input: input || {} }, ms),
         resolve: rpc.resolve,
         dispose: rpc.dispose,
       };
@@ -104,6 +104,7 @@
       enabled: true,
       hostLocalization: 'on',
       navOutline: true,
+      telemetryBar: true,
       ...(initialConfig && typeof initialConfig === 'object' ? initialConfig : {}),
     };
 
@@ -112,6 +113,13 @@
     let syncTimer = 0;
     let usageCtl = null;
     let usageModRef = null;
+
+    // 底部遥测条状态
+    let telSnap = null;
+    let telPollTimer = 0;
+    let telInFlight = false;
+    let telLastCid = '';
+    let telLastAt = 0;
 
     // 左侧提问大纲状态
     let outlinePopover = null;
@@ -411,6 +419,182 @@
       return pop;
     };
 
+    // ── 底部遥测状态条（速度 / 缓存 / 上下文 / 用量 / 配额） ────────────────
+    const fmtTokShort = (n) => {
+      const v = Number(n);
+      if (!Number.isFinite(v) || v <= 0) return '0';
+      if (v >= 1e6) return `${(v / 1e6).toFixed(1)}M`;
+      if (v >= 1e3) return `${(v / 1e3).toFixed(v >= 1e5 ? 0 : 1)}K`;
+      return String(Math.round(v));
+    };
+
+    const getCurrentConvId = () => {
+      try {
+        const m = String(W.location?.pathname || '').match(/\/c\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+        if (m) return m[1];
+        const el = D.querySelector('[data-cascade-id]');
+        const id = el?.getAttribute?.('data-cascade-id') || '';
+        if (/^[0-9a-f-]{36}$/i.test(id)) return id;
+      } catch {}
+      return null;
+    };
+
+    const pickActiveQuotaPct = (snap) => {
+      const groups = Array.isArray(snap?.groups) ? snap.groups : [];
+      if (!groups.length) return null;
+      const modelTxt = String(D.querySelector('[data-testid="model-selector-trigger"]')?.textContent || snap?.speed?.model || '').toLowerCase();
+      let picked = groups[0];
+      if (/claude|gpt|sonnet|opus/i.test(modelTxt)) {
+        picked = groups.find((g) => /claude|gpt/i.test(String(g.name || g.id || ''))) || picked;
+      } else if (/gemini/i.test(modelTxt)) {
+        picked = groups.find((g) => /gemini/i.test(String(g.name || g.id || ''))) || picked;
+      }
+      const w5 = picked?.windows?.['5h'];
+      const ww = picked?.windows?.weekly;
+      const vals = [w5?.remaining, ww?.remaining].filter((v) => typeof v === 'number' && Number.isFinite(v));
+      if (!vals.length) return null;
+      return { name: picked.name || picked.id || 'Quota', pct: Math.round(Math.min(...vals) * 100) };
+    };
+
+    const renderTelemetryBar = () => {
+      const footer = D.querySelector('.agy-composer-footer');
+      const existing = D.getElementById('ag-claude-telemetry-bar');
+      if (!cfg.telemetryBar || !footer) {
+        if (existing) runGuardedMut(() => existing.remove());
+        return;
+      }
+      let bar = existing;
+      if (!bar || !footer.contains(bar)) {
+        if (bar) runGuardedMut(() => bar.remove());
+        bar = D.createElement('div');
+        bar.id = 'ag-claude-telemetry-bar';
+        bar.setAttribute('data-ag-claude-owned', '1');
+        bar.setAttribute('data-ag-no-i18n', '');
+        const rightGroup = footer.lastElementChild;
+        runGuardedMut(() => {
+          if (rightGroup && rightGroup.parentElement === footer) footer.insertBefore(bar, rightGroup);
+          else footer.appendChild(bar);
+        });
+      }
+
+      const zh = isZhUi();
+      const sp = telSnap?.speed || null;
+      const ctx = sp?.context || null;
+      const hitRate = sp?.cache?.hitRate;
+      const tps = Number.isFinite(sp?.latestTps) ? sp.latestTps : Number.isFinite(sp?.recentTps) ? sp.recentTps : sp?.tps;
+      const totalTok = sp?.tokens?.totalTokens;
+      const qInfo = pickActiveQuotaPct(telSnap);
+
+      const parts = [];
+      const tips = [];
+
+      if (typeof tps === 'number' && Number.isFinite(tps) && tps > 0.1) {
+        parts.push({ label: '', val: `${tps.toFixed(1)} tok/s` });
+        tips.push(`${zh ? '生成速度' : 'Speed'}: ${tps.toFixed(1)} tok/s`);
+      }
+      if (typeof hitRate === 'number' && Number.isFinite(hitRate)) {
+        const pct = (hitRate * 100).toFixed(1);
+        parts.push({ label: zh ? '缓存' : 'Cache', val: `${pct}%` });
+        tips.push(`${zh ? '缓存命中' : 'Cache Hit'}: ${pct}%`);
+      }
+      if (ctx && typeof ctx.usedFraction === 'number' && Number.isFinite(ctx.usedFraction)) {
+        const pct = Math.min(100, Math.max(0, Math.round(ctx.usedFraction * 100)));
+        parts.push({ ring: pct, label: '', val: `${pct}%`, warn: pct >= 85 });
+        tips.push(`${zh ? '上下文' : 'Context'}: ${fmtTokShort(ctx.usedTokens)} / ${fmtTokShort(ctx.maxTokens)} (${pct}%)`);
+      }
+      if (typeof totalTok === 'number' && Number.isFinite(totalTok) && totalTok > 0) {
+        parts.push({ label: zh ? '用量' : 'Used', val: fmtTokShort(totalTok) });
+        tips.push(`${zh ? '本会话总用量' : 'Session Tokens'}: ${fmtTokShort(totalTok)}`);
+      }
+      if (qInfo) {
+        parts.push({ label: zh ? '额度' : 'Quota', val: `${qInfo.pct}%`, warn: qInfo.pct <= 20 });
+        tips.push(`${qInfo.name}: ${qInfo.pct}%`);
+      }
+
+      runGuardedMut(() => {
+        bar.innerHTML = '';
+        if (!parts.length) {
+          const btn = D.createElement('button');
+          btn.type = 'button';
+          btn.className = 'ag-ct-btn';
+          btn.textContent = telInFlight ? (zh ? '统计同步中…' : 'Syncing…') : (zh ? '刷新用量' : 'Metrics');
+          btn.addEventListener('click', () => void pollTelemetry(true));
+          bar.appendChild(btn);
+          return;
+        }
+        const wrapBtn = D.createElement('button');
+        wrapBtn.type = 'button';
+        wrapBtn.className = 'ag-ct-btn';
+        wrapBtn.title = `${tips.join(' · ')}（${zh ? '点击刷新' : 'Click to refresh'}）`;
+        wrapBtn.addEventListener('click', () => void pollTelemetry(true));
+        parts.forEach((p, idx) => {
+          if (idx > 0) {
+            const sep = D.createElement('span');
+            sep.className = 'ag-ct-sep';
+            sep.textContent = '·';
+            wrapBtn.appendChild(sep);
+          }
+          const item = D.createElement('span');
+          item.className = p.warn ? 'ag-ct-item ag-ct-warn' : 'ag-ct-item';
+          if (typeof p.ring === 'number') {
+            const ring = D.createElement('span');
+            ring.className = 'ag-ct-ring';
+            ring.style.setProperty('--ct-pct', `${p.ring}%`);
+            item.appendChild(ring);
+          }
+          if (p.label) {
+            const lb = D.createElement('span');
+            lb.textContent = p.label;
+            item.appendChild(lb);
+          }
+          const val = D.createElement('span');
+          val.className = 'ag-ct-val';
+          val.textContent = p.val;
+          item.appendChild(val);
+          wrapBtn.appendChild(item);
+        });
+        bar.appendChild(wrapBtn);
+      });
+    };
+
+    const pollTelemetry = async (force = false) => {
+      if (destroyed || !cfg.telemetryBar || telInFlight) return;
+      if (D.hidden && !force) return;
+      const bridge = W.__agPrismMetricsBridge;
+      if (!bridge || !isFn(bridge.getMetrics) || !bridge.isOnline?.()) return;
+      const cid = getCurrentConvId();
+      const now = Date.now();
+      if (!force && cid === telLastCid && now - telLastAt < 8000) return;
+      telInFlight = true;
+      telLastCid = cid || '';
+      telLastAt = now;
+      if (!telSnap) renderTelemetryBar();
+      try {
+        const res = await bridge.getMetrics({
+          conversationId: cid,
+          force: Boolean(force),
+          quotaRefresh: Boolean(force || !telSnap?.groups?.length),
+          selectLatest: true,
+        }, 22000);
+        if (res && typeof res === 'object' && !res.timeout && !res.offline) {
+          telSnap = res;
+        }
+      } catch {} finally {
+        telInFlight = false;
+        if (!destroyed) renderTelemetryBar();
+      }
+    };
+
+    const scheduleTelemetryLoop = () => {
+      if (telPollTimer) { clearTimeout(telPollTimer); telPollTimer = 0; }
+      if (destroyed || !cfg.telemetryBar) return;
+      telPollTimer = setTimeout(async () => {
+        telPollTimer = 0;
+        await pollTelemetry(false);
+        scheduleTelemetryLoop();
+      }, 10000);
+    };
+
     // ── 用量统计控制器（按需挂载至设置弹窗独立栏） ─────────────────────────
     const getUsageController = () => {
       const mod = W.__agPrismHomeStudioPanel || W.__agHomeStudioPanel;
@@ -622,6 +806,7 @@
         setChk('enabled', Boolean(cfg.enabled));
         setChk('hostLocalization', cfg.hostLocalization === 'on');
         setChk('navOutline', Boolean(cfg.navOutline));
+        setChk('telemetryBar', Boolean(cfg.telemetryBar));
       };
 
       if (!card) {
@@ -690,6 +875,16 @@
           () => Boolean(cfg.navOutline),
           (next) => saveSetting('navOutline', next)
         );
+        addSwitchRow(
+          'telemetryBar',
+          zh ? '底部遥测状态条' : 'Composer Telemetry Strip',
+          zh ? '在输入框底栏展示生成速度、缓存命中、上下文占用与配额余量' : 'Show speed, cache hit rate, context usage, and quota in composer footer',
+          () => Boolean(cfg.telemetryBar),
+          (next) => {
+            saveSetting('telemetryBar', next);
+            if (next) { void pollTelemetry(true); scheduleTelemetryLoop(); }
+          }
+        );
 
         // 快捷打开「用量统计」行
         const statRow = D.createElement('div');
@@ -726,7 +921,12 @@
       ensureBridges();
       applyThemeAndStyle();
       ensureOutlineUi();
+      renderTelemetryBar();
       syncSettingsDialog();
+      const cid = getCurrentConvId() || '';
+      if (cfg.telemetryBar && (!telSnap || cid !== telLastCid)) {
+        void pollTelemetry(false);
+      }
     };
 
     const scheduleSync = () => {
@@ -752,6 +952,10 @@
     ensureBridges();
     applyThemeAndStyle();
     syncAll();
+    if (cfg.telemetryBar) {
+      void pollTelemetry(false);
+      scheduleTelemetryLoop();
+    }
 
     obs.observe(D.documentElement, {
       subtree: true,
@@ -775,6 +979,7 @@
         if (destroyed) return;
         destroyed = true;
         if (syncTimer) { clearTimeout(syncTimer); syncTimer = 0; }
+        if (telPollTimer) { clearTimeout(telPollTimer); telPollTimer = 0; }
         closeOutline();
         try { obs.disconnect(); } catch {}
         try { W.removeEventListener('click', onDocClick, true); } catch {}

@@ -2,5 +2,6 @@
   "enabled": true,
   "hostLocalization": "on",
   "navOutline": true,
+  "telemetryBar": true,
   "pollIntervalMs": 2500
 }

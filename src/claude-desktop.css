@@ -189,7 +189,7 @@ html[data-ag-claude="1"] :is(
   flex-shrink: 0 !important;
 }
 
-/* Quiet Section Headers (Projects / Conversations) */
+/* Distinct Bold Section Headers (Projects / Conversations) */
 html[data-ag-claude="1"] :is(
   [data-testid="section-header"],
   [data-testid="pinned-section-header"],
@@ -199,7 +199,7 @@ html[data-ag-claude="1"] :is(
   padding: 4px 10px !important;
   border-top: 0 !important;
   background-color: var(--claude-sb) !important;
-  color: var(--claude-muted) !important;
+  color: var(--claude-fg) !important;
   opacity: 1 !important;
 }
 
@@ -208,10 +208,10 @@ html[data-ag-claude="1"] :is(
   [data-testid="pinned-section-header"],
   [data-testid="coordinator-section-header"]
 ) :is(h2, button, span) {
-  font-size: 12px !important;
-  font-weight: 500 !important;
-  letter-spacing: 0.01em !important;
-  color: var(--claude-muted) !important;
+  font-size: 13.5px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.015em !important;
+  color: var(--claude-fg) !important;
   opacity: 1 !important;
 }
 
@@ -555,7 +555,76 @@ html[data-ag-claude="1"] #antigravity\.agentSidePanelInputBox [data-testid="inpu
   color: var(--claude-fg) !important;
 }
 
-/* Explicitly suppress any legacy telemetry / pulse bar */
+/* Warm Minimalist Composer Telemetry Strip (Speed / Cache / Context / Quota) */
+html[data-ag-claude-mounted="1"] #ag-claude-telemetry-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  margin-right: 6px;
+  padding: 2px 8px;
+  border-radius: 8px;
+  font-family: var(--claude-sans);
+  font-size: 11.5px;
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+  color: var(--claude-muted);
+  white-space: nowrap;
+  user-select: none;
+  cursor: default;
+}
+
+html[data-ag-claude-mounted="1"] #ag-claude-telemetry-bar .ag-ct-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--claude-muted);
+}
+
+html[data-ag-claude-mounted="1"] #ag-claude-telemetry-bar .ag-ct-val {
+  color: var(--claude-fg-2);
+  font-weight: 500;
+}
+
+html[data-ag-claude-mounted="1"] #ag-claude-telemetry-bar .ag-ct-sep {
+  opacity: 0.4;
+}
+
+html[data-ag-claude-mounted="1"] #ag-claude-telemetry-bar .ag-ct-ring {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: conic-gradient(var(--claude-accent) var(--ct-pct, 0%), var(--claude-border-2) 0);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2.4px), #000 calc(100% - 2px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2.4px), #000 calc(100% - 2px));
+  flex-shrink: 0;
+}
+
+html[data-ag-claude-mounted="1"] #ag-claude-telemetry-bar .ag-ct-warn .ag-ct-val {
+  color: var(--claude-accent);
+}
+
+html[data-ag-claude-mounted="1"] #ag-claude-telemetry-bar .ag-ct-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 5px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition: background-color 130ms ease, color 130ms ease;
+}
+
+html[data-ag-claude-mounted="1"] #ag-claude-telemetry-bar .ag-ct-btn:hover {
+  background: var(--claude-hover);
+  color: var(--claude-fg);
+}
+
+/* Explicitly suppress legacy obsidian-prism pulse bar */
 html[data-ag-claude="1"] #ag-prism-pulse-bar,
 html[data-ag-claude="1"] [data-ag-prism-pulse="1"] {
   display: none !important;

@@ -71,6 +71,40 @@ class ClaudeDesktopDaemon {
     this._lazyClient = null;
     this._modelLabels = new Map();
     this._usageCache = new Map();
+    this._usageCacheFile = path.join(os.homedir(), '.gemini', 'config', 'claude-desktop-usage-cache.json');
+    this._legacyUsageCacheFile = path.join(os.homedir(), '.gemini', 'config', 'obsidian-prism-usage-rollup-cache.json');
+    this._loadUsageDiskCache();
+  }
+
+  _loadUsageDiskCache() {
+    for (const file of [this._legacyUsageCacheFile, this._usageCacheFile]) {
+      try {
+        if (!fs.existsSync(file)) continue;
+        const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+        const local = parsed?.scopes?.local || parsed?.entries || {};
+        if (!local || typeof local !== 'object') continue;
+        for (const [k, hit] of Object.entries(local)) {
+          if (hit?.record?.days) {
+            this._usageCache.set(String(k).toLowerCase(), hit);
+          }
+        }
+      } catch {}
+    }
+  }
+
+  _saveUsageDiskCache() {
+    try {
+      const entries = {};
+      for (const [k, v] of this._usageCache.entries()) {
+        if (v?.record?.days) entries[k] = v;
+      }
+      fs.mkdirSync(path.dirname(this._usageCacheFile), { recursive: true });
+      fs.writeFileSync(
+        this._usageCacheFile,
+        JSON.stringify({ version: 1, scopes: { local: entries } }),
+        'utf8'
+      );
+    } catch {}
   }
 
   log(msg) {
@@ -113,7 +147,7 @@ class ClaudeDesktopDaemon {
   // 通过已附着主窗口执行 Renderer LS RPC（读取配额与会话轨迹元数据）
   async _invokeRendererRpc(method, body = {}) {
     const expr = buildRendererRpcExpression(method, body);
-    const timeoutMs = method === 'Probe' ? 2600 : 12000;
+    const timeoutMs = method === 'Probe' ? 2600 : method === 'GetCascadeTrajectory' ? 25000 : 12000;
     let lastErr = null;
     for (const entry of this.sessions.values()) {
       if (!entry || entry.session.closed) continue;
@@ -208,17 +242,27 @@ class ClaudeDesktopDaemon {
 
     if (action === 'list-summaries') {
       const cachedRecords = [];
+      const present = new Set();
       for (const s of list) {
-        const hit = this._usageCache.get(String(s.id || '').toLowerCase());
+        const key = String(s.id || '').toLowerCase();
+        present.add(key);
+        const hit = this._usageCache.get(key);
         if (hit?.record?.days) {
           cachedRecords.push({ id: s.id, mode: 'full', record: hit.record });
+        }
+      }
+      for (const [key, hit] of this._usageCache.entries()) {
+        if (present.has(key)) continue;
+        if (hit?.record?.days) {
+          cachedRecords.push({ id: hit.record.cascadeId || key, mode: 'full', archived: true, record: hit.record });
         }
       }
       return { ok: true, scopeKey: 'local', records: cachedRecords, summaries: list };
     }
 
-    const reqItems = Array.isArray(parsed?.items) ? parsed.items.slice(0, 16) : [];
+    const reqItems = Array.isArray(parsed?.items) ? parsed.items.slice(0, 12) : [];
     const records = [];
+    let dirty = false;
     for (const item of reqItems) {
       const id = String(item?.id || '').trim();
       if (!GUID_RE.test(id)) continue;
@@ -227,33 +271,34 @@ class ClaudeDesktopDaemon {
       const stepCount = Number(item.stepCount || bSum.stepCount || 0) || 0;
       const lastModifiedSec = Number(item.lastModifiedSec || bSum.lastModifiedSec || 0) || 0;
       const hit = this._usageCache.get(low);
-      if (hit && hit.stepCount === stepCount && hit.lastModifiedSec === lastModifiedSec && hit.record?.days) {
+      if (hit?.record?.days && hit.stepCount === stepCount && (!lastModifiedSec || hit.lastModifiedSec === lastModifiedSec)) {
         records.push({ id, mode: 'full', record: hit.record });
         continue;
       }
       try {
-        const gmRes = typeof client._fetchMetadataOnly === 'function'
-          ? await client._fetchMetadataOnly(id)
-          : await client.call('GetCascadeTrajectoryGeneratorMetadata', {
-              cascadeId: id,
-              generatorMetadataOffset: 0,
-              includeMessages: false,
-            });
-        const items = gmRes?.generatorMetadata || gmRes?.generatorMetadatas || [];
         const summaryStub = {
           ...bSum,
           stepCount,
           lastModifiedTime: lastModifiedSec > 0 ? { seconds: lastModifiedSec } : bSum.lastModifiedTime,
         };
-        const record = this.usageCore.buildUsageRecordFromGeneratorMetadata(id, items, summaryStub);
-        if (record) {
+        const fullTraj = typeof client.trajectory === 'function'
+          ? await client.trajectory(id, { force: Boolean(parsed?.force), summary: summaryStub })
+          : await client.call('GetCascadeTrajectory', { cascadeId: id });
+        const record = this.usageCore.analyzeTrajectoryForUsage(fullTraj, summaryStub, id);
+        if (record && record.days) {
           this._usageCache.set(low, { stepCount, lastModifiedSec, record });
+          dirty = true;
           records.push({ id, mode: 'full', record });
+        } else if (hit?.record?.days) {
+          records.push({ id, mode: 'full', record: hit.record });
         }
       } catch {
-        // 单条轨迹不可读时不阻断整批统计
+        if (hit?.record?.days) {
+          records.push({ id, mode: 'full', record: hit.record });
+        }
       }
     }
+    if (dirty) this._saveUsageDiskCache();
     return {
       ok: true,
       scopeKey: 'local',

@@ -30,6 +30,7 @@ const DEFAULT_CONFIG = {
   enabled: true,
   hostLocalization: 'on',
   navOutline: true,
+  telemetryBar: true,
   pollIntervalMs: 2500,
 };
 
@@ -39,6 +40,7 @@ function sanitizeConfig(raw) {
     enabled: src.enabled !== false,
     hostLocalization: src.hostLocalization === 'off' ? 'off' : 'on',
     navOutline: src.navOutline !== false,
+    telemetryBar: src.telemetryBar !== false,
     pollIntervalMs:
       Number.isFinite(Number(src.pollIntervalMs)) && Number(src.pollIntervalMs) >= 1000
         ? Math.min(15000, Math.floor(Number(src.pollIntervalMs)))
