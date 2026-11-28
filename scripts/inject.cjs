@@ -19,6 +19,7 @@ const cdp = require(path.join(ROOT_DIR, 'src', 'cdp-core.js'));
   const pages = await cdp.listPages(port);
   const cfg = cdp.readConfig(ROOT_DIR);
   const mainExpr = cdp.buildInjectExpression(cfg, ROOT_DIR);
+  const telemetryExpr = cdp.buildTelemetryUiExpression(cfg, ROOT_DIR);
   const i18nExpr = cdp.buildHostI18nExpression(cfg, ROOT_DIR);
 
   console.log(`[+] CDP 端口 ${port}，发现 ${pages.length} 个窗口`);
@@ -26,6 +27,7 @@ const cdp = require(path.join(ROOT_DIR, 'src', 'cdp-core.js'));
     const sess = await cdp.CdpSession.connect(page.webSocketDebuggerUrl, 5000);
     try {
       const r1 = await sess.evaluate(mainExpr, false, 6000);
+      if (telemetryExpr) await sess.evaluate(telemetryExpr, false, 6000).catch(() => {});
       if (i18nExpr) await sess.evaluate(i18nExpr, false, 6000).catch(() => {});
       console.log(`[ok] ${page.title} -> ${JSON.stringify(r1)}`);
     } finally {

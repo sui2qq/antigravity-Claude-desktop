@@ -215,20 +215,23 @@ function hashText(s) {
   return crypto.createHash('sha1').update(String(s || '')).digest('hex').slice(0, 12);
 }
 
-// 清理旧版 obsidian-prism 注入痕迹（无缝迁移用）
+// 清理旧版 obsidian-prism 注入痕迹（仅在旧主运行时存在时触发，避免误伤本插件复用的原版遥测条）
 const LEGACY_PRISM_CLEANUP_SNIPPET = `
   try {
+    const hadLegacy = Boolean(window.__agPrism || window.__agClaudeStyle || document.getElementById('ag-prism-css') || document.getElementById('ag-claude-style-css'));
     if (window.__agPrism?.destroy) window.__agPrism.destroy();
     if (window.__agClaudeStyle?.destroy) window.__agClaudeStyle.destroy();
     for (const id of ['ag-prism-css', 'ag-claude-style-css', 'ag-prism-settings-v101-css', 'ag-prism-omni-css', 'ag-prism-periodic-picker-css', 'ag-prism-wallpaper-css', 'ag-prism-suggester-css', 'ag-prism-motion-off-css', 'ag-prism-inline-diff-css']) {
       document.getElementById(id)?.remove();
     }
-    document.querySelectorAll('#ag-prism-pulse-bar, #ag-cs-settings-sec, .ag-cs-nav-outline-trigger, .ag-cs-nav-outline-popover, .ag-cs-conv-aura-host, .ag-cs-prism-rim-cv, [data-ag-cs-usage-nav="1"]').forEach((n) => n.remove());
-    const de = document.documentElement;
-    if (de) {
-      for (const a of Array.from(de.attributes)) {
-        if (a.name.startsWith('data-ag-cs-') || a.name === 'data-ag-prism' || a.name.startsWith('data-ag-prism-')) {
-          if (a.name !== 'data-ag-prism-host-i18n') de.removeAttribute(a.name);
+    document.querySelectorAll('#ag-cs-settings-sec, .ag-cs-nav-outline-trigger, .ag-cs-nav-outline-popover, .ag-cs-conv-aura-host, .ag-cs-prism-rim-cv, [data-ag-cs-usage-nav="1"]').forEach((n) => n.remove());
+    if (hadLegacy) {
+      const de = document.documentElement;
+      if (de) {
+        for (const a of Array.from(de.attributes)) {
+          if (a.name === 'data-ag-prism' || (a.name.startsWith('data-ag-prism-') && a.name !== 'data-ag-prism-host-i18n')) {
+            de.removeAttribute(a.name);
+          }
         }
       }
     }
@@ -349,14 +352,76 @@ function buildHostI18nExpression(config = null, rootDir = ROOT_DIR) {
   })()`;
 }
 
+function buildTelemetryUiExpression(config = null, rootDir = ROOT_DIR) {
+  const cfg = sanitizeConfig(config || readConfig(rootDir));
+  const telDir = path.join(rootDir, 'vendor', 'telemetry');
+  const usageCorePath = path.join(rootDir, 'src', 'usage-core.js');
+  const vialCorePath = path.join(telDir, 'vial-core.js');
+  const bridgePath = path.join(telDir, 'pulse-vial-bridge.js');
+  const fallbackPath = path.join(telDir, 'inline-fallback.js');
+  if (!fs.existsSync(fallbackPath)) return '';
+
+  const usageCoreSrc = fs.existsSync(usageCorePath) ? fs.readFileSync(usageCorePath, 'utf8') : '';
+  const vialCoreSrc = fs.existsSync(vialCorePath) ? fs.readFileSync(vialCorePath, 'utf8') : '';
+  const bridgeSrc = fs.existsSync(bridgePath) ? fs.readFileSync(bridgePath, 'utf8') : '';
+  const fallbackSrc = fs.readFileSync(fallbackPath, 'utf8');
+  const codeHash = hashText(vialCoreSrc + '\n' + bridgeSrc + '\n' + fallbackSrc);
+  const lang = cfg.hostLocalization === 'on' ? 'zh-CN' : 'en';
+  const mode = cfg.telemetryBar ? 'on' : 'off';
+
+  return `(() => {
+    try {
+      if (window.self !== window.top) return { ok: false, status: 'skipped-subframe' };
+    } catch { return { ok: false, status: 'skipped-subframe' }; }
+    const isHost = Boolean(
+      document.body?.classList?.contains('theme-standalone') ||
+      document.querySelector('.agy-shell, .agy-home, [data-testid="conversation-view"], [data-testid="sidebar-split"], [data-testid="agent-input-box"]')
+    );
+    if (!isHost) return { ok: false, status: 'skipped-non-host' };
+    const targetHash = ${serializeForEval(codeHash)};
+    const mode = ${serializeForEval(mode)};
+    const lang = ${serializeForEval(lang)};
+    const de = document.documentElement;
+    if (de) {
+      de.setAttribute('data-ag-cs-telemetry', mode);
+      de.setAttribute('data-ag-cs-lang', lang);
+    }
+    if (window.__agPrismTelemetry?.__claudeHash === targetHash) {
+      try { window.__agPrismTelemetry.sync({ telemetryModule: mode, language: lang }); } catch {}
+      if (mode === 'on' && window.__agCsPulseVialBridge?.mountPulseVialBridge) {
+        try { window.__agCsPulseVialBridge.mountPulseVialBridge({ defaultMode: 'bar', pollIntervalMs: 3000 }); } catch {}
+      } else if (mode === 'off') {
+        try { window.__agCsPulseBridgeInst?.destroy?.(); } catch {}
+      }
+      return { ok: true, status: 'reused', mode, codeHash: targetHash };
+    }
+    try { window.__agCsPulseBridgeInst?.destroy?.(); } catch {}
+    try { window.__agPrismTelemetry?.destroy?.(); } catch {}
+    if (!window.__agCsUsageCore) { ${usageCoreSrc}; }
+    ${vialCoreSrc};
+    ${bridgeSrc};
+    ${fallbackSrc};
+    if (window.__agPrismTelemetry) {
+      window.__agPrismTelemetry.__claudeHash = targetHash;
+      try { window.__agPrismTelemetry.sync({ telemetryModule: mode, language: lang }); } catch {}
+    }
+    if (mode === 'on' && window.__agCsPulseVialBridge?.mountPulseVialBridge) {
+      try { window.__agCsPulseVialBridge.mountPulseVialBridge({ defaultMode: 'bar', pollIntervalMs: 3000 }); } catch {}
+    }
+    return { ok: Boolean(window.__agPrismTelemetry), status: 'mounted', mode, codeHash: targetHash };
+  })()`;
+}
+
 function buildRemoveExpression() {
   return `(() => {
     ${LEGACY_PRISM_CLEANUP_SNIPPET}
+    try { window.__agCsPulseBridgeInst?.destroy?.(); } catch {}
+    try { window.__agPrismTelemetry?.destroy?.(); } catch {}
     try { window.__agClaudeDesktop?.destroy?.(); } catch {}
     try { window.__agPrismHostI18n?.destroy?.(); } catch {}
     try { window.__agPrismUsageBridge?.dispose?.(); } catch {}
-    try { window.__agPrismMetricsBridge?.dispose?.(); } catch {}
-    try { delete window.__agPrismHomeStudioPanel; delete window.__agHomeStudioPanel; delete window.__agCsUsageCore; } catch {}
+    try { document.querySelectorAll('#ag-prism-pulse-bar, [data-ag-prism-pulse-bar]').forEach((n) => n.remove()); } catch {}
+    try { delete window.__agPrismHomeStudioPanel; delete window.__agHomeStudioPanel; delete window.__agCsUsageCore; delete window.__agPrismTelemetry; delete window.__agCsPulseVialBridge; delete window.__agVialCore; } catch {}
     return { ok: true, status: 'removed' };
   })()`;
 }
@@ -379,6 +444,7 @@ module.exports = {
   CdpSession,
   serializeForEval,
   buildInjectExpression,
+  buildTelemetryUiExpression,
   buildUsagePanelExpression,
   buildHostI18nExpression,
   buildRemoveExpression,

@@ -24,24 +24,27 @@ test('claude-desktop.css: lightweight, warm-parchment tokens, zero glassmorphism
   assert.ok(css.includes('#262624') && css.includes('#1F1E1D'), 'Must include dark warm charcoal tokens');
   assert.ok(css.includes('#C96442'), 'Must include terracotta accent');
   assert.ok(css.includes('height: 37px !important'), 'Must include 37px Claude-proportioned top nav items');
-  assert.ok(css.includes('#ag-prism-pulse-bar'), 'Must suppress legacy telemetry pulse bar');
+  assert.ok(css.includes('#ag-prism-pulse-bar'), 'Must anchor upstream telemetry pulse bar cleanly');
 });
 
-test('cdp-core.js: generates syntactically valid inject, usage-panel, host-i18n, and remove expressions', () => {
-  const cfg = cdp.sanitizeConfig({ enabled: true, hostLocalization: 'on', navOutline: true });
+test('cdp-core.js: generates syntactically valid inject, telemetry-ui, usage-panel, host-i18n, and remove expressions', () => {
+  const cfg = cdp.sanitizeConfig({ enabled: true, hostLocalization: 'on', navOutline: true, telemetryBar: true });
   const mainExpr = cdp.buildInjectExpression(cfg, ROOT);
+  const telExpr = cdp.buildTelemetryUiExpression(cfg, ROOT);
   const usageExpr = cdp.buildUsagePanelExpression(ROOT);
   const i18nOnExpr = cdp.buildHostI18nExpression({ ...cfg, hostLocalization: 'on' }, ROOT);
   const i18nOffExpr = cdp.buildHostI18nExpression({ ...cfg, hostLocalization: 'off' }, ROOT);
   const rmExpr = cdp.buildRemoveExpression();
 
   assert.ok(mainExpr.length > 5000 && mainExpr.length < 95_000, `Unexpected main bundle size: ${mainExpr.length}`);
+  assert.ok(telExpr.length > 80_000, 'Telemetry UI bundle should include upstream inline-fallback + vial bridge');
   assert.ok(usageExpr.length > 30_000, 'Usage panel bundle should include usage-core + usage-panel');
   assert.ok(i18nOnExpr.length > 100_000, 'Host i18n ON bundle should include runtime + zh-CN dict');
   assert.ok(i18nOffExpr.includes("status: 'off'"), 'Host i18n OFF should emit lightweight cleanup');
 
   for (const [label, src] of [
     ['main', mainExpr],
+    ['telemetry-ui', telExpr],
     ['usage', usageExpr],
     ['i18n-on', i18nOnExpr],
     ['i18n-off', i18nOffExpr],

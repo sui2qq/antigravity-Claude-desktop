@@ -415,6 +415,12 @@ class ClaudeDesktopDaemon {
           await entry.session.evaluate(expr, false, 6000).catch(() => {});
           entry.usagePanelMounted = true;
         }
+      } else if (parsed?.action === 'request-telemetry-ui') {
+        const cfg = this.cdp.readConfig(this.rootDir);
+        const expr = this.cdp.buildTelemetryUiExpression(cfg, this.rootDir);
+        if (expr && !entry.session.closed) {
+          await entry.session.evaluate(expr, false, 6000).catch(() => {});
+        }
       }
       return;
     }
@@ -459,6 +465,7 @@ class ClaudeDesktopDaemon {
     if (!entry || entry.session.closed) return;
     const cfg = cfgOverride || this.cdp.readConfig(this.rootDir);
     const mainExpr = this.cdp.buildInjectExpression(cfg, this.rootDir);
+    const telemetryExpr = this.cdp.buildTelemetryUiExpression(cfg, this.rootDir);
     const i18nExpr = this.cdp.buildHostI18nExpression(cfg, this.rootDir);
 
     if (entry.scriptId) {
@@ -467,6 +474,15 @@ class ClaudeDesktopDaemon {
     }
     const addMain = await entry.session.send('Page.addScriptToEvaluateOnNewDocument', { source: mainExpr }).catch(() => null);
     if (addMain?.identifier) entry.scriptId = addMain.identifier;
+
+    if (entry.telemetryScriptId) {
+      await entry.session.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: entry.telemetryScriptId }).catch(() => {});
+      entry.telemetryScriptId = null;
+    }
+    if (telemetryExpr && cfg.telemetryBar) {
+      const addTel = await entry.session.send('Page.addScriptToEvaluateOnNewDocument', { source: telemetryExpr }).catch(() => null);
+      if (addTel?.identifier) entry.telemetryScriptId = addTel.identifier;
+    }
 
     if (entry.i18nScriptId) {
       await entry.session.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: entry.i18nScriptId }).catch(() => {});
@@ -478,6 +494,9 @@ class ClaudeDesktopDaemon {
     }
 
     await entry.session.evaluate(mainExpr, false, 6000).catch(() => null);
+    if (telemetryExpr) {
+      await entry.session.evaluate(telemetryExpr, false, 6000).catch(() => null);
+    }
     if (i18nExpr) {
       await entry.session.evaluate(i18nExpr, false, 6000).catch(() => null);
     }
